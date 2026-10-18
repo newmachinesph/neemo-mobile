@@ -1,0 +1,289 @@
+import { useRef, useState, useMemo, useCallback } from 'react';
+import { View, Pressable, Alert } from 'react-native';
+import { Stack, useRouter } from 'expo-router';
+import { BottomSheetModal as GorhomBottomSheetModal } from '@gorhom/bottom-sheet';
+import * as Print from 'expo-print';
+import { shareAsync } from 'expo-sharing';
+
+import { ScreenContainer } from '@ui/components/ScreenContainer';
+import { Card } from '@ui/components/Card';
+import { Text } from '@ui/components/Text';
+import { Icon } from '@ui/components/Icon';
+import { StaggeredFadeIn } from '@ui/components/StaggeredFadeIn';
+import { formatCurrency } from '@lib/utils/currency';
+import { hapticLight } from '@lib/utils/haptics';
+import { useFinanceStore } from '@features/finance/store/finance.store';
+import { TaxDashboard } from '@features/finance/components/TaxDashboard';
+import { AddTaxRecordSheet } from '@features/finance/components/AddTaxRecordSheet';
+import { useTheme } from '@theme/ThemeProvider';
+import type { TaxRecord } from '@features/finance/types/finance.types';
+
+export default function TaxToolsScreen() {
+  const router = useRouter();
+  const { colors } = useTheme();
+  const taxRecords = useFinanceStore((s) => s.taxRecords);
+  const transactions = useFinanceStore((s) => s.transactions);
+  const addRef = useRef<GorhomBottomSheetModal | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<TaxRecord | null>(null);
+  const [tab, setTab] = useState<'calculator' | 'records'>('calculator');
+
+  // Compute real tax summary for the current year
+  const currentYear = new Date().getFullYear();
+
+  const summary = useMemo(() => {
+    // Gross income: sum of all income transactions in the current year
+    const yearTransactions = transactions.filter((txn) => {
+      const txnYear = new Date(txn.date).getFullYear();
+      return txnYear === currentYear;
+    });
+
+    const grossIncome = yearTransactions
+      .filter((txn) => txn.type === 'income')
+      .reduce((sum, txn) => sum + txn.amount, 0);
+
+    // Total expenses: sum of all expense transactions in the current year
+    const totalExpenses = yearTransactions
+      .filter((txn) => txn.type === 'expense')
+      .reduce((sum, txn) => sum + txn.amount, 0);
+
+    // Tax paid: sum from taxRecords for the current year
+    const yearTaxRecords = taxRecords.filter((r) => r.year === currentYear);
+    const taxPaid = yearTaxRecords.reduce((sum, r) => sum + r.taxPaid, 0);
+    const taxDue = yearTaxRecords.reduce((sum, r) => sum + r.taxDue, 0);
+    const deductions = yearTaxRecords.reduce((sum, r) => sum + r.deductions, 0);
+
+    const hasData = grossIncome > 0 || totalExpenses > 0 || yearTaxRecords.length > 0;
+
+    return { grossIncome, totalExpenses, taxPaid, taxDue, deductions, hasData };
+  }, [transactions, taxRecords, currentYear]);
+
+  const handleExportPdf = useCallback(async () => {
+    const html = `
+      <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <style>
+            body { font-family: -apple-system, Helvetica, Arial, sans-serif; padding: 40px; color: #1F2937; }
+            h1 { color: #9b1b3c; font-size: 24px; margin-bottom: 4px; }
+            .subtitle { color: #6B7280; font-size: 14px; margin-bottom: 32px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+            th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid #E5E7EB; }
+            th { font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; }
+            td { font-size: 16px; }
+            .amount { font-weight: 600; text-align: right; }
+            .footer { margin-top: 40px; font-size: 11px; color: #9CA3AF; text-align: center; }
+          </style>
+        </head>
+        <body>
+          <h1>${currentYear} Tax Summary</h1>
+          <p class="subtitle">Generated on ${new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+          <table>
+            <tr>
+              <th>Item</th>
+              <th style="text-align:right">Amount</th>
+            </tr>
+            <tr>
+              <td>Gross Income</td>
+              <td class="amount">${formatCurrency(summary.grossIncome)}</td>
+            </tr>
+            <tr>
+              <td>Total Expenses</td>
+              <td class="amount">${formatCurrency(summary.totalExpenses)}</td>
+            </tr>
+            <tr>
+              <td>Deductions (from tax records)</td>
+              <td class="amount">${formatCurrency(summary.deductions)}</td>
+            </tr>
+            <tr>
+              <td>Tax Due</td>
+              <td class="amount">${formatCurrency(summary.taxDue)}</td>
+            </tr>
+            <tr>
+              <td><strong>Tax Paid</strong></td>
+              <td class="amount"><strong>${formatCurrency(summary.taxPaid)}</strong></td>
+            </tr>
+          </table>
+          <p class="footer">This document was generated by Neemo Finance App. Please verify all figures with your accountant before filing.</p>
+        </body>
+      </html>
+    `;
+
+    try {
+      const { uri } = await Print.printToFileAsync({ html });
+      await shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf' });
+    } catch {
+      // Fallback to alert if printing/sharing fails
+      Alert.alert(
+        'Export Complete',
+        `Your ${currentYear} Tax Summary:\n\nGross Income: ${formatCurrency(summary.grossIncome)}\nExpenses: ${formatCurrency(summary.totalExpenses)}\nDeductions: ${formatCurrency(summary.deductions)}\nTax Due: ${formatCurrency(summary.taxDue)}\nTax Paid: ${formatCurrency(summary.taxPaid)}`,
+      );
+    }
+  }, [summary, currentYear]);
+
+  const headerLeft = useCallback(() => null, []);
+  const headerRight = useCallback(() => (
+    <Pressable
+      onPress={() => router.back()}
+      hitSlop={12}
+      className="mr-2"
+      accessibilityRole="button"
+      accessibilityLabel="Close tax tools"
+    >
+      <Icon name="close" size={24} color={colors.text} />
+    </Pressable>
+  ), [colors.text, router]);
+  const headerTitleStyle = useMemo(() => ({ fontFamily: 'Inter-SemiBold' as const, fontSize: 17 }), []);
+  const headerStyle = useMemo(() => ({ backgroundColor: colors.background }), [colors.background]);
+  const screenOptions = useMemo(() => ({
+    headerShown: true,
+    title: 'Tax Tools',
+    headerTitleStyle,
+    headerShadowVisible: false,
+    headerStyle,
+    headerTintColor: colors.text,
+    headerLeft,
+    headerRight,
+  }), [headerTitleStyle, headerLeft, headerRight, headerStyle, colors.text]);
+
+  return (
+    <>
+      <Stack.Screen options={screenOptions} />
+
+      <ScreenContainer edges={['bottom', 'left', 'right']}>
+        {/* Tab Pills */}
+        <StaggeredFadeIn index={0}>
+          <View className="mb-4 flex-row gap-2">
+            {(['calculator', 'records'] as const).map((t) => (
+              <Pressable
+                key={t}
+                onPress={() => { hapticLight(); setTab(t); }}
+                className={`flex-1 items-center rounded-xl py-2.5 border ${
+                  tab === t ? 'bg-primary-500 border-primary-500' : 'border-neutral-200 dark:border-neutral-700'
+                }`}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: tab === t }}
+                accessibilityLabel={t === 'calculator' ? 'Calculator tab' : 'Records tab'}
+              >
+                <Text variant="caption" className={`font-sans-semibold capitalize ${tab === t ? 'text-white' : ''}`}>
+                  {t}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </StaggeredFadeIn>
+
+        <StaggeredFadeIn index={1}>
+          {tab === 'calculator' && (
+            <>
+              {/* Tax Export Summary */}
+              <View
+                className="mb-4 rounded-2xl p-4 shadow-sm"
+                style={{
+                  borderWidth: 1.5,
+                  borderColor: `${colors.success}30`,
+                  backgroundColor: colors.surface,
+                }}
+              >
+                <View className="flex-row items-center" style={{ gap: 10 }}>
+                  <View className="h-10 w-10 items-center justify-center rounded-full" style={{ backgroundColor: `${colors.success}20` }}>
+                    <Icon name="document-text-outline" size={20} color={colors.success} />
+                  </View>
+                  <View className="flex-1">
+                    <Text variant="body" className="font-sans-semibold">{currentYear} Tax Summary</Text>
+                    {summary.hasData ? (
+                      <Text variant="caption" style={{ color: colors.textTertiary, fontSize: 10 }}>
+                        Gross: {formatCurrency(summary.grossIncome)} · Tax Due: {formatCurrency(summary.taxDue)} · Deductions: {formatCurrency(summary.deductions)}
+                      </Text>
+                    ) : (
+                      <Text variant="caption" style={{ color: colors.textTertiary, fontSize: 10 }}>
+                        No tax records for this year yet
+                      </Text>
+                    )}
+                  </View>
+                </View>
+                <Pressable
+                  onPress={() => { hapticLight(); handleExportPdf(); }}
+                  className="mt-3 flex-row items-center justify-center rounded-xl py-2.5"
+                  style={{ backgroundColor: colors.success }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Export tax summary as PDF"
+                >
+                  <Icon name="download-outline" size={18} color="#FFFFFF" />
+                  <Text variant="caption" className="ml-1 font-sans-semibold" style={{ color: '#FFFFFF' }}>
+                    Export PDF
+                  </Text>
+                </Pressable>
+              </View>
+
+              <TaxDashboard />
+            </>
+          )}
+
+          {tab === 'records' && (
+            <>
+              {taxRecords.length === 0 ? (
+                <Card>
+                  <Text variant="caption" className="py-6 text-center text-neutral-400">
+                    No tax records yet. Tap + to add one.
+                  </Text>
+                </Card>
+              ) : (
+                taxRecords.map((record) => (
+                  <Card key={record.id} className="mb-3" pressable onPress={() => {
+                    hapticLight();
+                    setSelectedRecord(record);
+                    addRef.current?.present();
+                  }}>
+                    <View className="flex-row items-center justify-between">
+                      <View>
+                        <Text variant="body" className="font-sans-semibold">
+                          Q{record.quarter} {record.year}
+                        </Text>
+                        <Text variant="caption" className="text-neutral-500">
+                          Gross: {formatCurrency(record.grossIncome)}
+                        </Text>
+                      </View>
+                      <View className="items-end">
+                        <Text variant="body" className="font-sans-bold">
+                          {formatCurrency(record.taxDue)}
+                        </Text>
+                        <Text
+                          variant="caption"
+                          style={{ color: record.status === 'filed' ? colors.success : colors.warning }}
+                        >
+                          {record.status === 'filed' ? 'Filed' : 'Pending'}
+                        </Text>
+                      </View>
+                    </View>
+                  </Card>
+                ))
+              )}
+            </>
+          )}
+        </StaggeredFadeIn>
+      </ScreenContainer>
+
+      {tab === 'records' && (
+        <Pressable
+          onPress={() => {
+            hapticLight();
+            setSelectedRecord(null);
+            addRef.current?.present();
+          }}
+          className="absolute bottom-6 right-6 h-14 w-14 items-center justify-center rounded-full bg-primary-500 shadow-lg active:opacity-80"
+          style={{ elevation: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="Add tax record"
+        >
+          <Icon name="add" size={28} color="#FFFFFF" />
+        </Pressable>
+      )}
+
+      <AddTaxRecordSheet
+        sheetRef={addRef}
+        editItem={selectedRecord}
+        onDismiss={() => setSelectedRecord(null)}
+      />
+    </>
+  );
+}
